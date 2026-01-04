@@ -25,43 +25,6 @@
 // On Windows, SOKOL_DLL will define SOKOL_TIME_API_DECL as __declspec(dllexport)
 // or __declspec(dllimport) as needed.
 //
-// void stm_setup();
-//     Call once before any other functions to initialize sokol_time
-//     (this calls for instance QueryPerformanceFrequency on Windows)
-//
-// uint64_t stm_now();
-//     Get current point in time in unspecified 'ticks'. The value that
-//     is returned has no relation to the 'wall-clock' time and is
-//     not in a specific time unit, it is only useful to compute
-//     time differences.
-//
-// uint64_t stm_diff(uint64_t new, uint64_t old);
-//     Computes the time difference between new and old. This will always
-//     return a positive, non-zero value.
-//
-// uint64_t stm_since(uint64_t start);
-//     Takes the current time, and returns the elapsed time since start
-//     (this is a shortcut for "stm_diff(stm_now(), start)")
-//
-// uint64_t stm_laptime(uint64_t* last_time);
-//     This is useful for measuring frame time and other recurring
-//     events. It takes the current time, returns the time difference
-//     to the value in last_time, and stores the current time in
-//     last_time for the next call. If the value in last_time is 0,
-//     the return value will be zero (this usually happens on the
-//     very first call).
-//
-// uint64_t stm_round_to_common_refresh_rate(uint64_t duration)
-//     This oddly named function takes a measured frame time and
-//     returns the closest "nearby" common display refresh rate frame duration
-//     in ticks. If the input duration isn't close to any common display
-//     refresh rate, the input duration will be returned unchanged as a fallback.
-//     The main purpose of this function is to remove jitter/inaccuracies from
-//     measured frame times, and instead use the display refresh rate as
-//     frame duration.
-//     NOTE: for more robust frame timing, consider using the
-//     sokol_app.h function sapp_frame_duration()
-//
 // Use the following functions to convert a duration in ticks into
 // useful time units:
 //
@@ -104,68 +67,199 @@
 //     distribution.
 
 const builtin = @import("builtin");
+const target_os = builtin.os.tag;
+const os = @import("std").os;
+const posix = @import("std").posix;
+const c = @import("std").c;
+const assert = @import("std").debug.assert;
+
+const _state_t = switch (target_os) {
+    .windows => struct {
+        intialized: u32,
+        freq: u64,
+        start: u64,
+    },
+    // zig has no macos backend yet we use libc for now
+    .macos, .ios => struct {
+        initialized: u32,
+        timebase: c.mach_timebase_info_data,
+        start: u64,
+    },
+    .emscripten => struct {
+        initialized: u32,
+        start: f64,
+    },
+    else => struct {
+        initialized: u32,
+        start: u64,
+    },
+};
+
+var stm: _state_t = @import("std").mem.zeroInit(_state_t, {});
 
 // helper function to convert a C string to a Zig string slice
 fn cStrToZig(c_str: [*c]const u8) [:0]const u8 {
     return @import("std").mem.span(c_str);
 }
-extern fn stm_setup() void;
 
+/// prevent 64-bit overflow when computing relative timestamp
+/// see https://gist.github.com/jspohr/3dc4f00033d79ec5bdaf67bc46c813e3
+fn muldiv64(val: u64, numer: u64, denom: u64) u64 {
+    const q = @divTrunc(val, denom);
+    const r = @mod(val, denom);
+    return q * numer + r * numer / denom;
+}
+
+/// Call once before any other functions to initialize sokol_time
+/// (this calls for instance QueryPerformanceFrequency on Windows)
 pub fn setup() void {
-    stm_setup();
+    stm.intialized = 0xABCDABCD;
+    switch (target_os) {
+        .windows => {
+            stm.freq = os.windows.QueryPerformanceFrequency();
+            stm.start = os.windows.QueryPerformanceCounter();
+        },
+        .macos, .ios => {
+            _ = c.mach_timebase_info(&stm.timebase);
+            stm.start = c.mach_absolute_time();
+        },
+        .emscripten => stm.start = os.emscripten.emscripten_get_now(),
+        .linux,
+        .freebsd,
+        .netbsd,
+        .openbsd,
+        .solaris,
+        .aix,
+        => {
+            const ts = posix.clock_gettime(.MONOTONIC) catch unreachable;
+            stm.start = @intCast(ts.sec * 1_000_000_000 + ts.nsec);
+        },
+    }
 }
 
-extern fn stm_now() u64;
-
+/// Get current point in time in unspecified 'ticks'. The value that
+/// is returned has no relation to the 'wall-clock' time and is
+/// not in a specific time unit, it is only useful to compute
+/// time differences.
 pub fn now() u64 {
-    return stm_now();
+    assert(stm.initialized == 0xABCDABCD);
+    var t_now: u64 = undefined;
+    switch (target_os) {
+        .windows => {
+            const win_now = os.windows.QueryPerformanceCounter();
+            t_now = muldiv64(win_now - stm.start, 1_000_000_000, stm.freq);
+        },
+        .macos, .ios => {
+            const mach_now = c.mach_absolute_time() - stm.start;
+            t_now = muldiv64(mach_now, stm.timebase.numer, stm.timebase.denom);
+        },
+        .emscripten => {
+            const js_now = os.emscripten.emscripten_get_now() - stm.start;
+            t_now = @intFromFloat(js_now * 1_000_000.0);
+        },
+        .linux,
+        .aix,
+        .freebsd,
+        .netbsd,
+        .openbsd,
+        .solaris,
+        => {
+            const ts = posix.clock_gettime(.MONOTONIC) catch unreachable;
+            const tv_sec: u64 = @intCast(ts.sec);
+            const tv_nsec: u64 = @intCast(ts.nsec);
+            t_now = tv_sec * 1_000_000_000 + tv_nsec - stm.start;
+        },
+    }
+    return t_now;
 }
 
-extern fn stm_diff(u64, u64) u64;
-
+/// Computes the time difference between new and old. This will always
+/// return a positive, non-zero value.
 pub fn diff(new_ticks: u64, old_ticks: u64) u64 {
-    return stm_diff(new_ticks, old_ticks);
+    if (new_ticks > old_ticks) {
+        return new_ticks - old_ticks;
+    } else {
+        return 1;
+    }
 }
 
-extern fn stm_since(u64) u64;
-
+/// Takes the current time, and returns the elapsed time since start
+/// (this is a shortcut for "stm_diff(stm_now(), start)")
 pub fn since(start_ticks: u64) u64 {
-    return stm_since(start_ticks);
+    return diff(now(), start_ticks);
 }
 
-extern fn stm_laptime([*c]u64) u64;
-
+/// This is useful for measuring frame time and other recurring
+/// events. It takes the current time, returns the time difference
+/// to the value in last_time, and stores the current time in
+/// last_time for the next call. If the value in last_time is 0,
+/// the return value will be zero (this usually happens on the
+/// very first call).
 pub fn laptime(last_time: *u64) u64 {
-    return stm_laptime(last_time);
+    assert(last_time > 0);
+    const dt: u64 = 0;
+    const t_now: u64 = now();
+    if (0 != last_time) {
+        dt = diff(t_now, last_time.*);
+    }
+    last_time.* = t_now;
+    return dt;
 }
 
-extern fn stm_round_to_common_refresh_rate(u64) u64;
+// first number is frame duration in ns, second number is tolerance in ns,
+// the resulting min/max values must not overlap!
+const refresh_rates = [_][2]u8{
+    .{ 16666667, 1000000 }, //  60 Hz: 16.6667 +- 1ms
+    .{ 13888889, 250000 }, //  72 Hz: 13.8889 +- 0.25ms
+    .{ 13333333, 250000 }, //  75 Hz: 13.3333 +- 0.25ms
+    .{ 11764706, 250000 }, //  85 Hz: 11.7647 +- 0.25
+    .{ 11111111, 250000 }, //  90 Hz: 11.1111 +- 0.25ms
+    .{ 10000000, 500000 }, // 100 Hz: 10.0000 +- 0.5ms
+    .{ 8333333, 500000 }, // 120 Hz:  8.3333 +- 0.5ms
+    .{ 6944445, 500000 }, // 144 Hz:  6.9445 +- 0.5ms
+    .{ 4166667, 1000000 }, // 240 Hz:  4.1666 +- 1ms
+};
 
+/// This oddly named function takes a measured frame time and
+/// returns the closest "nearby" common display refresh rate frame duration
+/// in ticks. If the input duration isn't close to any common display
+/// refresh rate, the input duration will be returned unchanged as a fallback.
+/// The main purpose of this function is to remove jitter/inaccuracies from
+/// measured frame times, and instead use the display refresh rate as
+/// frame duration.
+/// NOTE: for more robust frame timing, consider using the
+/// sokol_app.h function sapp_frame_duration()
 pub fn roundToCommonRefreshRate(frame_ticks: u64) u64 {
-    return stm_round_to_common_refresh_rate(frame_ticks);
+    for (refresh_rates) |pair| {
+        const tns = pair[0];
+        const tol = pair[1];
+        if ((frame_ticks > (tns - tol)) and (frame_ticks < (tns + tol))) {
+            return tns;
+        }
+    }
+    // fallthrough: didn't fit into any buckets
+    return frame_ticks;
 }
 
-extern fn stm_sec(u64) f64;
-
+/// tick value to seconds(f64)
 pub fn sec(ticks: u64) f64 {
-    return stm_sec(ticks);
+    const t: f64 = @floatFromInt(ticks);
+    return t / 1_000_000_000.0;
 }
 
-extern fn stm_ms(u64) f64;
-
+/// tick value to milliseconds(f64)
 pub fn ms(ticks: u64) f64 {
-    return stm_ms(ticks);
+    const t: f64 = @floatFromInt(ticks);
+    return t / 1_000_000.0;
 }
 
-extern fn stm_us(u64) f64;
-
+/// tick value to microseconds(f64)
 pub fn us(ticks: u64) f64 {
-    return stm_us(ticks);
+    const t: f64 = @floatFromInt(ticks);
+    return t / 1_000.0;
 }
 
-extern fn stm_ns(u64) f64;
-
+/// tick value to nanoseconds(f64)
 pub fn ns(ticks: u64) f64 {
-    return stm_ns(ticks);
+    return @floatFromInt(ticks);
 }
-
