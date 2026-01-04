@@ -76,11 +76,7 @@ pub fn build(b: *Build) !void {
     const opt_sokol_imgui_cprefix = b.option([]const u8, "sokol_imgui_cprefix", "Override Dear ImGui C bindings prefix for sokol_imgui.h (see SOKOL_IMGUI_CPREFIX)");
     const opt_cimgui_header_path = b.option([]const u8, "cimgui_header_path", "Override the Dear ImGui C bindings header name (default: cimgui.h)");
     const opt_dynamic_linkage = b.option(bool, "dynamic_linkage", "Build sokol_clib artifact as dynamic link library.") orelse false;
-    const sokol_backend: SokolBackend = if (opt_use_gl) .gl
-        else if (opt_use_gles3) .gles3
-        else if (opt_use_wgpu) .wgpu
-        else if (opt_use_vulkan) .vulkan
-        else .auto;
+    const sokol_backend: SokolBackend = if (opt_use_gl) .gl else if (opt_use_gles3) .gles3 else if (opt_use_wgpu) .wgpu else if (opt_use_vulkan) .vulkan else .auto;
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
