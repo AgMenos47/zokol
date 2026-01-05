@@ -100,27 +100,150 @@
 //     distribution.
 
 const builtin = @import("builtin");
+const target_os = builtin.os.tag;
+const posix = @import("std").posix;
+const os = @import("std").os;
+const c = @import("std").c;
+const debug = @import("std").debug;
 
 // helper function to convert a C string to a Zig string slice
 fn cStrToZig(c_str: [*c]const u8) [:0]const u8 {
     return @import("std").mem.span(c_str);
 }
-/// Plug this function into the 'logger.func' struct item when initializing any of the sokol
-/// headers. For instance for sokol_audio.h it would look like this:
-///
-/// saudio_setup(&(saudio_desc){
-///     .logger = {
-///         .func = slog_func
-///     }
-/// });
-extern fn slog_func([*c]const u8, u32, u32, [*c]const u8, u32, [*c]const u8, ?*anyopaque) void;
+
+const LINE_LENGTH = 512;
+
+fn append(str: [*c]const u8, dst: [*c]u8, end: [*c]u8) [*c]u8 {
+    var d = dst;
+    var s = str;
+    if (s > 0) {
+        var cn: u8 = s.*;
+        while (cn != 0 and (dst < (end - 1))) : ({
+            cn = s.*;
+            s += 1;
+        }) {
+            d.* = cn;
+            d += 1;
+        }
+    }
+    d.* = 0;
+    return d;
+}
+
+fn itoa(x: u32, buf: [*]u8, buf_size: usize) [*]allowzero u8 {
+    var n = x;
+    const zero: u32 = @intCast('0');
+    const max_digits_and_null: usize = 11;
+    if (buf_size < max_digits_and_null) return @ptrFromInt(0);
+    var p: [*c]u8 = buf + max_digits_and_null;
+    p.* = 0;
+    p -= 1;
+    while (n != 0) : ({
+        p.* = @truncate(zero + (n % 10));
+        p -= 1;
+        n = @divTrunc(n, 10);
+    }) {}
+    return p;
+}
 
 /// Plug this function into the 'logger.func' struct item when initializing any of the sokol
 /// headers. For instance for sokol_audio.h it would look like this:
 ///
+/// ```zig
 /// saudio_setup(&(saudio_desc){
 ///     .logger = {
 ///         .func = slog_func
 ///     }
 /// });
-pub const func = slog_func;
+/// ```
+/// Plug this function into the 'logger.func' struct item when initializing any of the sokol
+/// headers. For instance for sokol_audio.h it would look like this:
+///
+/// ```zig
+/// saudio_setup(&(saudio_desc){
+///     .logger = {
+///         .func = slog_func
+///     }
+/// });
+/// ```
+pub fn func(
+    tag: [*c]const u8,
+    log_level: u32,
+    log_item: u32,
+    message: [*c]const u8,
+    line_nr: u32,
+    filename: [*c]const u8,
+    user_data: ?*anyopaque,
+) callconv(.c) void {
+    _ = user_data;
+
+    const log_level_str: [*c]const u8 = switch (log_level) {
+        0 => "panic",
+        1 => "error",
+        2 => "warning",
+        else => "info",
+    };
+
+    // build log output line
+    var line_buf: [LINE_LENGTH]u8 = undefined;
+    var str: [*c]u8 = @ptrCast(&line_buf[0]);
+    const end: [*c]u8 = @ptrCast(&line_buf[LINE_LENGTH - 1]);
+    var num_buf: [32]u8 = undefined;
+    if (tag > 0) {
+        str = append("[", str, end);
+        str = append(tag, str, end);
+        str = append("]", str, end);
+    }
+    str = append("[", str, end);
+    str = append(log_level_str, str, end);
+    str = append("]", str, end);
+    str = append("[id:", str, end);
+    str = append(itoa(log_item, @ptrCast(&num_buf), num_buf.len), str, end);
+    str = append("]", str, end);
+    if (filename > 0) {
+        str = append(" ", str, end);
+        str = append(filename, str, end);
+        str = append(":", str, end);
+        str = append(itoa(line_nr, @ptrCast(&num_buf), num_buf.len), str, end);
+        str = append(":0: ", str, end);
+    } else {
+        str = append("[line:", str, end);
+        str = append(itoa(line_nr, @ptrCast(&num_buf), num_buf.len), str, end);
+        str = append("] ", str, end);
+    }
+    if (message > 0) {
+        str = append("\n\t", str, end);
+        str = append(message, str, end);
+    }
+    str = append("\n\n", str, end);
+    if (0 == log_level) {
+        str = append("ABORTING because of [panic]\n", str, end);
+    }
+
+    @import("std").log.err("{s}", .{line_buf});
+
+    // // print to stderr?
+    // #if defined(_SLOG_LINUX) || defined(_SLOG_WINDOWS) || defined(_SLOG_APPLE)
+    //     fputs(line_buf, stderr);
+    // #endif
+    //
+    //
+    // // platform specific logging calls
+    // #if defined(_SLOG_WINDOWS)
+    //     OutputDebugStringA(line_buf);
+    // #elif defined(_SLOG_ANDROID)
+    //     int prio;
+    //     switch (log_level) {
+    //         case 0: prio = ANDROID_LOG_FATAL; break;
+    //         case 1: prio = ANDROID_LOG_ERROR; break;
+    //         case 2: prio = ANDROID_LOG_WARN; break;
+    //         default: prio = ANDROID_LOG_INFO; break;
+    //     }
+    //     __android_log_write(prio, "SOKOL", line_buf);
+    // #elif defined(_SLOG_EMSCRIPTEN)
+    //     slog_js_log(log_level, line_buf);
+    // #endif
+    if (0 == log_level) {
+        c.abort();
+    }
+}

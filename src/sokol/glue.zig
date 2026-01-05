@@ -80,20 +80,80 @@
 
 const builtin = @import("builtin");
 const sg = @import("gfx.zig");
-
+const sapp = @import("app.zig");
 // helper function to convert a C string to a Zig string slice
 fn cStrToZig(c_str: [*c]const u8) [:0]const u8 {
     return @import("std").mem.span(c_str);
 }
-extern fn sglue_environment() sg.Environment;
 
+fn sglue_to_sgpixelformat(fmt: sapp.PixelFormat) sg.PixelFormat {
+    switch (fmt) {
+        .NONE => return .NONE,
+        .RGBA8 => return .RGBA8,
+        .SRGB8A8 => return .SRGB8A8,
+        .BGRA8 => return .BGRA8,
+        .DEPTH_STENCIL => return .DEPTH_STENCIL,
+        .DEPTH => return .DEPTH,
+        else => unreachable,
+    }
+}
+
+/// Returns an sg_environment struct initialized by calling sokol_app.h
+/// functions. Use this in the sg_setup() call like this:
+/// ```zig
+/// sg.setup(&(sg.Desc){
+///     .environment = sglue.environment(),
+///     ...
+/// });
+/// ```
 pub fn environment() sg.Environment {
-    return sglue_environment();
+    var res: sg.Environment = @import("std").mem.zeroes(sg.Environment);
+    const env: sapp.Environment = sapp.getEnvironment();
+    res.defaults.color_format = sglue_to_sgpixelformat(env.defaults.color_format);
+    res.defaults.depth_format = sglue_to_sgpixelformat(env.defaults.depth_format);
+    res.defaults.sample_count = env.defaults.sample_count;
+    res.metal.device = env.metal.device;
+    res.d3d11.device = env.d3d11.device;
+    res.d3d11.device_context = env.d3d11.device_context;
+    res.wgpu.device = env.wgpu.device;
+    res.vulkan.physical_device = env.vulkan.physical_device;
+    res.vulkan.device = env.vulkan.device;
+    res.vulkan.queue = env.vulkan.queue;
+    res.vulkan.queue_family_index = env.vulkan.queue_family_index;
+    return res;
 }
 
-extern fn sglue_swapchain() sg.Swapchain;
-
+/// Returns an sg.Swapchain struct initialized by calling app.zig
+/// functions. Use this in sg.beginPass() for a 'swapchain pass' like
+/// this:
+/// ```zig
+/// sg.beginPass(&(sg.Pass){ .swapchain = sglue.swapchain(), ... });
+/// ```
 pub fn swapchain() sg.Swapchain {
-    return sglue_swapchain();
+    var res: sg.Swapchain = @import("std").mem.zeroes(sg.Swapchain);
+    const sc: sapp.Swapchain = sapp.getSwapchain();
+    res.width = sc.width;
+    res.height = sc.height;
+    res.sample_count = sc.sample_count;
+    res.color_format = sglue_to_sgpixelformat(sc.color_format);
+    res.depth_format = sglue_to_sgpixelformat(sc.depth_format);
+    res.metal.current_drawable = sc.metal.current_drawable;
+    res.metal.depth_stencil_texture = sc.metal.depth_stencil_texture;
+    res.metal.msaa_color_texture = sc.metal.msaa_color_texture;
+    res.d3d11.render_view = sc.d3d11.render_view;
+    res.d3d11.resolve_view = sc.d3d11.resolve_view;
+    res.d3d11.depth_stencil_view = sc.d3d11.depth_stencil_view;
+    res.wgpu.render_view = sc.wgpu.render_view;
+    res.wgpu.resolve_view = sc.wgpu.resolve_view;
+    res.wgpu.depth_stencil_view = sc.wgpu.depth_stencil_view;
+    res.vulkan.render_image = sc.vulkan.render_image;
+    res.vulkan.render_view = sc.vulkan.render_view;
+    res.vulkan.resolve_image = sc.vulkan.resolve_image;
+    res.vulkan.resolve_view = sc.vulkan.resolve_view;
+    res.vulkan.depth_stencil_image = sc.vulkan.depth_stencil_image;
+    res.vulkan.depth_stencil_view = sc.vulkan.depth_stencil_view;
+    res.vulkan.render_finished_semaphore = sc.vulkan.render_finished_semaphore;
+    res.vulkan.present_complete_semaphore = sc.vulkan.present_complete_semaphore;
+    res.gl.framebuffer = sc.gl.framebuffer;
+    return res;
 }
-
