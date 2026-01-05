@@ -89,13 +89,20 @@ const _state_t = switch (target_os) {
         initialized: u32,
         start: f64,
     },
-    else => struct {
+    .linux,
+    .aix,
+    .freebsd,
+    .netbsd,
+    .openbsd,
+    .solaris,
+    => struct {
         initialized: u32,
         start: u64,
     },
+    else => @compileError("Unsupported target\n"),
 };
 
-var stm: _state_t = @import("std").mem.zeroInit(_state_t, {});
+var stm: _state_t = undefined;
 
 // helper function to convert a C string to a Zig string slice
 fn cStrToZig(c_str: [*c]const u8) [:0]const u8 {
@@ -113,7 +120,7 @@ fn muldiv64(val: u64, numer: u64, denom: u64) u64 {
 /// Call once before any other functions to initialize sokol_time
 /// (this calls for instance QueryPerformanceFrequency on Windows)
 pub fn setup() void {
-    stm.intialized = 0xABCDABCD;
+    stm.initialized = 0xABCDABCD;
     switch (target_os) {
         .windows => {
             stm.freq = os.windows.QueryPerformanceFrequency();
@@ -131,9 +138,10 @@ pub fn setup() void {
         .solaris,
         .aix,
         => {
-            const ts = posix.clock_gettime(.MONOTONIC) catch unreachable;
+            const ts: posix.timespec = posix.clock_gettime(.MONOTONIC) catch unreachable;
             stm.start = @intCast(ts.sec * 1_000_000_000 + ts.nsec);
         },
+        else => @compileError("Unsupported target\n"),
     }
 }
 
@@ -169,6 +177,7 @@ pub fn now() u64 {
             const tv_nsec: u64 = @intCast(ts.nsec);
             t_now = tv_sec * 1_000_000_000 + tv_nsec - stm.start;
         },
+        else => @compileError("Unsupported target\n"),
     }
     return t_now;
 }
@@ -196,10 +205,10 @@ pub fn since(start_ticks: u64) u64 {
 /// the return value will be zero (this usually happens on the
 /// very first call).
 pub fn laptime(last_time: *u64) u64 {
-    assert(last_time > 0);
-    const dt: u64 = 0;
+    assert(@as(usize, @intFromPtr(last_time)) > 0);
+    var dt: u64 = 0;
     const t_now: u64 = now();
-    if (0 != last_time) {
+    if (0 != last_time.*) {
         dt = diff(t_now, last_time.*);
     }
     last_time.* = t_now;
